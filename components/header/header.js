@@ -327,7 +327,7 @@ function Header(props) {
         {unlockOpen && <Unlock modalOpen={unlockOpen} closeModal={closeUnlock} />}
         <TransactionQueue setQueueLength={ setQueueLength } />
     </div>
-    {chainInvalid ? (
+    {/* {chainInvalid ? (
       <div className={classes.chainInvalidError}>
         <div className={classes.ErrorContent}>
           <WrongNetworkIcon className={ classes.networkIcon } />
@@ -337,7 +337,7 @@ function Header(props) {
           <Button className={classes.switchNetworkBtn} variant="contained" onClick={()=>switchChain()} >Switch to { process.env.NEXT_PUBLIC_CHAINID == '4002' ? 'Fantom Testnet' : 'Fantom Mainnet' }</Button>
         </div>
       </div>
-    ) : null}
+    ) : null} */}
     </div>
   );
 }
