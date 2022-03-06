@@ -136,6 +136,9 @@ class Store {
           case ACTIONS.CLAIM_REWARD:
             this.claimRewards(payload)
             break
+          case ACTIONS.CLAIM_VE_DIST:
+            this.claimVeDist(payload)
+            break
           case ACTIONS.CLAIM_ALL_REWARDS:
             this.claimAllRewards(payload)
             break;
@@ -2701,8 +2704,6 @@ class Store {
   }
 
   quoteSwap = async (payload) => {
-    const txUUID = this.getTXUUID()
-    console.log(`Entered Quote: ${txUUID}`)
     try {
       const web3 = await stores.accountStore.getWeb3Provider()
       if (!web3) {
@@ -2834,29 +2835,36 @@ class Store {
         return null
       }
 
+      const libraryContract = new web3.eth.Contract(CONTRACTS.LIBRARY_ABI, CONTRACTS.LIBRARY_ADDRESS)
       let totalRatio = 1
 
       for(let i = 0; i < bestAmountOut.routes.length; i++) {
-        if(bestAmountOut.routes[i].stable == true) {
+        let amountIn = bestAmountOut.receiveAmounts[i]
+        let amountOut = bestAmountOut.receiveAmounts[i+1]
 
-        } else {
-          const reserves = await routerContract.methods.getReserves(bestAmountOut.routes[i].from, bestAmountOut.routes[i].to, bestAmountOut.routes[i].stable).call()
-          let amountIn = 0
-          let amountOut = 0
-          if(i == 0) {
-            amountIn = sendFromAmount
-            amountOut = bestAmountOut.receiveAmounts[i+1]
-          } else {
-            amountIn = bestAmountOut.receiveAmounts[i]
-            amountOut = bestAmountOut.receiveAmounts[i+1]
-          }
+        const res = await libraryContract.methods.getTradeDiff(amountIn, bestAmountOut.routes[i].from, bestAmountOut.routes[i].to, bestAmountOut.routes[i].stable).call()
 
-          const amIn = BigNumber(amountIn).div(reserves.reserveA)
-          const amOut = BigNumber(amountOut).div(reserves.reserveB)
-          const ratio = BigNumber(amOut).div(amIn)
+        const ratio = BigNumber(res.b).div(res.a)
+        totalRatio = BigNumber(totalRatio).times(ratio).toFixed(18)
 
-          totalRatio = BigNumber(totalRatio).times(ratio).toFixed(18)
-        }
+        // if(bestAmountOut.routes[i].stable == true) {
+        //
+        // } else {
+        //   const reserves = await routerContract.methods.getReserves(bestAmountOut.routes[i].from, bestAmountOut.routes[i].to, bestAmountOut.routes[i].stable).call()
+        //   if(i == 0) {
+        //     amountIn = sendFromAmount
+        //     amountOut = bestAmountOut.receiveAmounts[i+1]
+        //   } else {
+        //     amountIn = bestAmountOut.receiveAmounts[i]
+        //     amountOut = bestAmountOut.receiveAmounts[i+1]
+        //   }
+        //
+        //   const amIn = BigNumber(amountIn).div(reserves.reserveA)
+        //   const amOut = BigNumber(amountOut).div(reserves.reserveB)
+        //   const ratio = BigNumber(amOut).div(amIn)
+        //
+        //   totalRatio = BigNumber(totalRatio).times(ratio).toFixed(18)
+        // }
       }
 
       const priceImpact = BigNumber(1).minus(totalRatio).times(100).toFixed(18)
@@ -2871,11 +2879,9 @@ class Store {
         priceImpact: priceImpact
       }
 
-      console.log(`Returned Quote: ${txUUID} : ${JSON.stringify(returnValue)}`)
       this.emitter.emit(ACTIONS.QUOTE_SWAP_RETURNED, returnValue)
 
     } catch(ex) {
-    console.log(`Exception Quote: ${txUUID}`)
       console.error(ex)
       this.emitter.emit(ACTIONS.QUOTE_SWAP_RETURNED, null)
       this.emitter.emit(ACTIONS.ERROR, ex)
@@ -3714,6 +3720,8 @@ class Store {
       const { tokenID } = payload.content
 
       const pairs = this.getStore('pairs')
+      const veToken = this.getStore('veToken')
+      const govToken = this.getStore('govToken')
 
       const filteredPairs = [...pairs.filter((pair) => {
         return pair && pair.gauge
@@ -3722,6 +3730,8 @@ class Store {
       const filteredPairs2 = [...pairs.filter((pair) => {
         return pair && pair.gauge
       })]
+
+      let veDistReward = []
 
       let filteredBribes = []
 
@@ -3765,6 +3775,24 @@ class Store {
           pair.rewardType = 'Bribe'
           return pair
         })
+
+        const veDistContract = new web3.eth.Contract(CONTRACTS.VE_DIST_ABI, CONTRACTS.VE_DIST_ADDRESS)
+        const veDistEarned = await veDistContract.methods.claimable(tokenID).call()
+        const vestNFTs = this.getStore('vestNFTs')
+        let theNFT = vestNFTs.filter((vestNFT) => {
+          return (vestNFT.id == tokenID)
+        })
+
+        if(BigNumber(veDistEarned).gt(0)) {
+          veDistReward.push({
+            token: theNFT[0],
+            lockToken: veToken,
+            rewardToken: govToken,
+            earned: BigNumber(veDistEarned).div(10**govToken.decimals).toFixed(govToken.decimals),
+            rewardType: 'Distribution'
+          })
+        }
+
       }
 
       const filteredFees = []
@@ -3802,11 +3830,13 @@ class Store {
       console.log(filteredBribes)
       console.log(filteredFees)
       console.log(filteredRewards)
+      console.log(veDistReward)
 
       const rewards = {
         bribes: filteredBribes,
         fees: filteredFees,
         rewards: filteredRewards,
+        veDist: veDistReward
       }
 
       this.setStore({
@@ -3892,6 +3922,7 @@ class Store {
       let claimTXID = this.getTXUUID()
       let feeClaimTXIDs = []
       let rewardClaimTXIDs = []
+      let distributionClaimTXIDs = []
 
 
       let bribePairs = pairs.filter((pair) => {
@@ -3904,6 +3935,10 @@ class Store {
 
       let rewardPairs = pairs.filter((pair) => {
         return pair.rewardType === 'Reward'
+      })
+
+      let distribution = pairs.filter((pair) => {
+        return pair.rewardType === 'Distribution'
       })
 
       const sendGauges = bribePairs.map((pair) => {
@@ -3952,6 +3987,19 @@ class Store {
           sendOBJ.transactions.push({
             uuid: newClaimTX,
             description: `Claiming reward for ${rewardPairs[i].symbol}`,
+            status: 'WAITING'
+          })
+        }
+      }
+
+      if(distribution.length > 0) {
+        for(let i = 0; i < distribution.length; i++) {
+          const newClaimTX = this.getTXUUID()
+
+          distributionClaimTXIDs.push(newClaimTX)
+          sendOBJ.transactions.push({
+            uuid: newClaimTX,
+            description: `Claiming distribution for NFT #${distribution[i].token.id}`,
             status: 'WAITING'
           })
         }
@@ -4018,6 +4066,25 @@ class Store {
         }
       }
 
+      if(distribution.length > 0) {
+        const veDistContract = new web3.eth.Contract(CONTRACTS.VE_DIST_ABI, CONTRACTS.VE_DIST_ADDRESS)
+        for(let i = 0; i < distribution.length; i++) {
+
+          const rewardPromise = new Promise((resolve, reject) => {
+            context._callContractWait(web3, veDistContract, 'claim', [tokenID], account, gasPrice, null, null, distributionClaimTXIDs[i], (err) => {
+              if (err) {
+                reject(err)
+                return
+              }
+
+              resolve()
+            })
+          })
+
+          await Promise.all([rewardPromise])
+        }
+      }
+
       this.getRewardBalances({ content: { tokenID } })
       this.emitter.emit(ACTIONS.CLAIM_ALL_REWARDS_RETURNED)
 
@@ -4068,6 +4135,52 @@ class Store {
 
         this.getRewardBalances({ content: { tokenID } })
         this.emitter.emit(ACTIONS.CLAIM_REWARD_RETURNED)
+      })
+    } catch(ex) {
+      console.error(ex)
+      this.emitter.emit(ACTIONS.ERROR, ex)
+    }
+  }
+
+  claimVeDist = async (payload) => {
+    try {
+      const account = stores.accountStore.getStore("account")
+      if (!account) {
+        console.warn('account not found')
+        return null
+      }
+
+      const web3 = await stores.accountStore.getWeb3Provider()
+      if (!web3) {
+        console.warn('web3 not found')
+        return null
+      }
+
+      const { tokenID } = payload.content
+
+      // ADD TRNASCTIONS TO TRANSACTION QUEUE DISPLAY
+      let claimTXID = this.getTXUUID()
+
+      this.emitter.emit(ACTIONS.TX_ADDED, { title: `Claim distribution for NFT #${tokenID}`, verb: 'Rewards Claimed', transactions: [
+        {
+          uuid: claimTXID,
+          description: `Claiming your distribution`,
+          status: 'WAITING'
+        }
+      ]})
+
+      const gasPrice = await stores.accountStore.getGasPrice()
+
+      // SUBMIT CLAIM TRANSACTION
+      const veDistContract = new web3.eth.Contract(CONTRACTS.VE_DIST_ABI, CONTRACTS.VE_DIST_ADDRESS)
+
+      this._callContractWait(web3, veDistContract, 'claim', [tokenID], account, gasPrice, null, null, claimTXID, async (err) => {
+        if (err) {
+          return this.emitter.emit(ACTIONS.ERROR, err)
+        }
+
+        this.getRewardBalances({ content: { tokenID } })
+        this.emitter.emit(ACTIONS.CLAIM_VE_DIST_RETURNED)
       })
     } catch(ex) {
       console.error(ex)
@@ -4223,6 +4336,7 @@ class Store {
         const context = this
 
         let sendGasAmount = BigNumber(gasAmount).times(1.5).toFixed(0)
+        let sendGasPrice = BigNumber(gasPrice).times(1.5).toFixed(0)
         // if (paddGasCost) {
         //   sendGasAmount = BigNumber(sendGasAmount).times(1.15).toFixed(0)
         // }
@@ -4233,7 +4347,7 @@ class Store {
         contract.methods[method](...params)
           .send({
             from: account.address,
-            gasPrice: web3.utils.toWei(gasPrice, 'gwei'),
+            gasPrice: web3.utils.toWei(sendGasPrice, 'gwei'),
             gas: sendGasAmount,
             value: sendValue,
             // maxFeePerGas: web3.utils.toWei(gasPrice, "gwei"),
